@@ -199,15 +199,15 @@ class MotionRecorder(threading.Thread):
 									self.append_buffer(output)
 							finally:
 								output.close()
-							self._output = None
+								self._output = None
 							logging.info("motion capture in {0}".format(name))
 					except picamera.PiCameraError as e:
 						logging.error("while saving recording: "+e)
 						pass
+					finally:
+						self._camera.led = False
 					# wait for the circular buffer to fill up before looping again
 					self.wait(self.prebuffer)
-				else:
-					self._camera.led = False
 
 	def save_buffer(self):
 		"""Start a new on-disk recording from circular framebuffer.
