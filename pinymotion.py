@@ -11,6 +11,7 @@ import numpy as np
 from scipy import ndimage
 import time
 import threading
+import queue
 import signal
 import logging
 from collections import deque
@@ -146,7 +147,7 @@ class MotionRecorder(threading.Thread):
 		self._motion.set() # this will trigger any remaining threads
 
 	def __init__(self, *args):
-		super(type(self), self).__init__(args=args)
+		super().__init__(*args)
 
 	def wait(self,timeout = 0.0):
 		"""Use this instead of time.sleep() from sub-threads so that they would
@@ -175,10 +176,14 @@ class MotionRecorder(threading.Thread):
 			inline_headers=True, intra_period=self.prebuffer*self.framerate // 2)
 		camera.wait_recording(1) # give camera some time to start up
 
+	captures = queue.Queue()
+
 	def run(self):
 		"""Main loop of the motion recorder. Waits for trigger from the motion detector
 		async task and writes in-memory circular buffer to file every time it happens,
-		until motion detection trigger
+		until motion detection trigger. After each recording, the name of the file
+		is posted to captures queue, where whatever is consuming the recordings can
+		pick it up.
 		"""
 		while self._camera.recording:
 			# wait for motion detection
@@ -200,7 +205,7 @@ class MotionRecorder(threading.Thread):
 							finally:
 								output.close()
 								self._output = None
-							logging.info("motion capture in {0}".format(name))
+							self.captures.put(name)
 					except picamera.PiCameraError as e:
 						logging.error("while saving recording: "+e)
 						pass
@@ -301,7 +306,10 @@ def capture():
 	try:
 		with MotionRecorder() as mr:
 			mr.start()
-			signal.pause()
+			while True:
+				recording = mr.captures.get()
+				logging.info("motion capture in '{0}'".format(recording))
+				mr.captures.task_done()
 	except (KeyboardInterrupt, SystemExit):
 		exit()
 
