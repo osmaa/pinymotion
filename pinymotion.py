@@ -133,7 +133,7 @@ class MotionRecorder(threading.Thread):
 	bitrate = 2000000 # 2Mbps is a high quality stream for 10 fps HD video
 	prebuffer = 10 # number of seconds to keep in buffer
 	postbuffer = 5 # number of seconds to record post end of motion
-	file_pattern = '%y-%m-%dT%H-%M.h264' # filename pattern for time.strfime
+	file_pattern = '%y-%m-%dT%H-%M-%S.h264' # filename pattern for time.strfime
 	motionlength = 10 # expected magnitude of motion (per MV block)
 	area = 25 # number of connected MV blocks (each 16x16 pixels) to count as a moving object
 	frames = 4 # number of frames which must contain movement to trigger
@@ -154,7 +154,6 @@ class MotionRecorder(threading.Thread):
 		camera = self._camera
 		if camera.recording:
 			camera.stop_recording()
-		self._motion.set() # this will trigger any remaining threads
 
 	def __init__(self, *args):
 		super().__init__(*args)
@@ -175,6 +174,7 @@ class MotionRecorder(threading.Thread):
 		motion is detected."""
 		self._camera = camera = picamera.PiCamera(
 			resolution=(self.width, self.height), framerate=self.framerate)
+		#camera.sensor_mode = 4
 		camera.start_preview(alpha=128)
 		self._stream = stream = picamera.PiCameraCircularIO(camera,
 			seconds=self.prebuffer+1, bitrate=self.bitrate)
@@ -202,66 +202,37 @@ class MotionRecorder(threading.Thread):
 					try:
 						# start a new video, then append circular buffer to it until
 						# motion ends
-						output,name = self.save_buffer()
-						if output is not None:
-							self._output = output
-							# we're now in recording mode, don't wait on the motion
-							# detector (it's triggered all the time)
-							try:
-								while self._motion.motion():
-									self.wait(self.prebuffer / 2)
-									self.append_buffer(output)
-							finally:
-								output.close()
-								self._output = None
-							self.captures.put(name)
+						name = time.strftime(self.file_pattern)
+						output = io.open(name, 'wb')
+						self.append_buffer(output,header=True)
+						while self._motion.motion() and self._camera.recording:
+							self.wait(self.prebuffer / 2)
+							self.append_buffer(output)
 					except picamera.PiCameraError as e:
 						logging.error("while saving recording: "+e)
 						pass
 					finally:
+						output.close()
+						self._output = None
 						self._camera.led = False
+						self.captures.put(name)
 					# wait for the circular buffer to fill up before looping again
 					self.wait(self.prebuffer / 2)
 
-	def save_buffer(self):
-		"""Start a new on-disk recording from circular framebuffer.
-		"""
-		if not self._stream or not self._camera.recording:
-			return None,None
-		stream = self._stream
-		name = time.strftime(self.file_pattern)
-		output = io.open(name, 'wb')
-		with stream.lock:
-			# find the first header, because our recording should start on one
-			for frame in stream.frames:
-				if frame.frame_type == picamera.PiVideoFrameType.sps_header:
-					logging.debug("capturing to {0} from frame {1}".format(name,frame.index))
-					stream.seek(frame.position)
-					break
-			# write out the circular buffer from header onwards, then truncate buffer
-			while True:
-				buf = stream.read1()
-				if not buf:
-					break
-				output.write(buf)
-			stream.seek(0)
-			stream.truncate()
-		return output, name
-
-	def append_buffer(self,output):
+	def append_buffer(self,output,header=False):
 		"""Flush contents of circular framebuffer to current on-disk recording.
 		"""
-		if not self._stream or not output or not self._camera.recording:
-			return
+		if header:
+			header=picamera.PiVideoFrameType.sps_header
+		else:
+			header=None
 		stream = self._stream
 		with stream.lock:
-			while True:
-				buf = stream.read1()
-				if not buf:
-					break
-				output.write(buf)
-			stream.seek(0)
-			stream.truncate()
+			stream.copy_to(output, first_frame=header)
+			#firstframe = lastframe = next(iter(stream.frames)).index
+			#for frame in stream.frames: lastframe = frame.index
+			#logging.debug("write {0} to {1}".format(firstframe,lastframe))
+			stream.clear()
 		return output
 
 	def blink(self):
