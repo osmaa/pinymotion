@@ -41,7 +41,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 	def __str__(self):
 		return "sensitivity {0}/{1}/{2}".format(self.motionlength, self.area, self.frames)
 
-	def __init__(self, camera, motionlength = 10, area = 25, frames = 4):
+	def __init__(self, camera, window=10, motionlength = 10, area = 25, frames = 4):
 		"""Initialize motion vector reader
 
 		Parameters
@@ -56,7 +56,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		self.motionlength = motionlength
 		self.area = area
 		self.frames = frames
-		self._last_frames = deque(maxlen=frames)
+		self._last_frames = deque(maxlen=window)
 		logging.debug("motion detection sensitivity: "+str(self))
 
 	def set(self):
@@ -101,13 +101,22 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		motion = (largest >= self.area)
 		# then consider motion repetition
 		self._last_frames.append(motion)
-		if motion:
-			#logging.debug("largest object size {0} ({1:2.1f}%)".format(largest, (largest/a.size*100)))
-			# must have repeating motion in order to qualify for trigger
-			if not self.motion() and self._last_frames.count(True) >= self.frames:
-				self.set()
-		# trailing detection for non-movement
-		elif self.motion() and self._last_frames.count(True) < self.frames:
+		motion_frames = self._last_frames.count(True)
+
+		def count_longest(a,value):
+			ret = i = 0
+			while i < len(a):
+				for j in range(0,len(a)-i):
+					if a[i+j] != value: break
+					ret = max(ret,j+1)
+				i += j+1
+			return ret
+		longest_motion_sequence = count_longest(self._last_frames, True)
+
+		if longest_motion_sequence >= self.frames:
+			self.set()
+		elif longest_motion_sequence < 1:
+			# clear motion flag once motion has ceased entirely
 			self.clear()
 		return
 
@@ -123,7 +132,8 @@ class MotionRecorder(threading.Thread):
 	framerate = 10 # lower framerate for more time on per-frame analysis
 	bitrate = 2000000 # 2Mbps is a high quality stream for 10 fps HD video
 	prebuffer = 10 # number of seconds to keep in buffer
-	file_pattern = '%y-%m-%dT%H:%M.h264' # filename pattern for time.strfime
+	postbuffer = 5 # number of seconds to record post end of motion
+	file_pattern = '%y-%m-%dT%H-%M.h264' # filename pattern for time.strfime
 	motionlength = 10 # expected magnitude of motion (per MV block)
 	area = 25 # number of connected MV blocks (each 16x16 pixels) to count as a moving object
 	frames = 4 # number of frames which must contain movement to trigger
@@ -163,13 +173,12 @@ class MotionRecorder(threading.Thread):
 		"""Sets up PiCamera to record H.264 High/4.1 profile video with enough
 		intra frames that there is at least one in the in-memory circular buffer when
 		motion is detected."""
-		self._camera = camera = picamera.PiCamera()
-		camera.resolution = (self.width, self.height)
-		camera.framerate = self.framerate
+		self._camera = camera = picamera.PiCamera(
+			resolution=(self.width, self.height), framerate=self.framerate)
 		camera.start_preview(alpha=128)
 		self._stream = stream = picamera.PiCameraCircularIO(camera,
 			seconds=self.prebuffer+1, bitrate=self.bitrate)
-		self._motion = motion = MotionVectorReader(camera,
+		self._motion = motion = MotionVectorReader(camera, window=self.postbuffer*self.framerate,
 			motionlength=self.motionlength, area=self.area, frames=self.frames)
 		camera.start_recording(stream, motion_output=motion,
 			format='h264', profile='high', level='4.1', bitrate=self.bitrate,
@@ -212,7 +221,7 @@ class MotionRecorder(threading.Thread):
 					finally:
 						self._camera.led = False
 					# wait for the circular buffer to fill up before looping again
-					self.wait(self.prebuffer)
+					self.wait(self.prebuffer / 2)
 
 	def save_buffer(self):
 		"""Start a new on-disk recording from circular framebuffer.
