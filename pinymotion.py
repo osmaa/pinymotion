@@ -195,6 +195,7 @@ class MotionRecorder(threading.Thread):
 		is posted to captures queue, where whatever is consuming the recordings can
 		pick it up.
 		"""
+		self._motion.disabled = False
 		while self._camera.recording:
 			# wait for motion detection
 			if self._motion.wait(self.prebuffer):
@@ -229,7 +230,7 @@ class MotionRecorder(threading.Thread):
 			header=None
 		stream = self._stream
 		with stream.lock:
-			stream.copy_to(output, first_frame=header)
+			stream.copy_to(output, seconds=self.prebuffer, first_frame=header)
 			#firstframe = lastframe = next(iter(stream.frames)).index
 			#for frame in stream.frames: lastframe = frame.index
 			#logging.debug("write {0} to {1}".format(firstframe,lastframe))
