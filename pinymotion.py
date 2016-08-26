@@ -71,6 +71,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 	def wait(self, timeout = 0.0):
 		return self.trigger.wait(timeout)
 
+	disabled = False
 	_last_frames = deque(maxlen=10)
 	@profile
 	def analyse(self, a):
@@ -113,7 +114,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 			return ret
 		longest_motion_sequence = count_longest(self._last_frames, True)
 
-		if longest_motion_sequence >= self.frames:
+		if longest_motion_sequence >= self.frames and not self.disabled:
 			self.set()
 		elif longest_motion_sequence < 1:
 			# clear motion flag once motion has ceased entirely
