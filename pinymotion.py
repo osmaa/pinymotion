@@ -135,9 +135,9 @@ class MotionRecorder(threading.Thread):
 	prebuffer = 10 # number of seconds to keep in buffer
 	postbuffer = 5 # number of seconds to record post end of motion
 	file_pattern = '%y-%m-%dT%H-%M-%S.h264' # filename pattern for time.strfime
-	motionlength = 10 # expected magnitude of motion (per MV block)
-	area = 25 # number of connected MV blocks (each 16x16 pixels) to count as a moving object
-	frames = 4 # number of frames which must contain movement to trigger
+	_motionlength = 10 # expected magnitude of motion (per MV block)
+	_area = 25 # number of connected MV blocks (each 16x16 pixels) to count as a moving object
+	_frames = 4 # number of frames which must contain movement to trigger
 
 	_camera = None
 	_motion = None
@@ -168,6 +168,28 @@ class MotionRecorder(threading.Thread):
 		except picamera.exc.PiCameraNotRecording:
 			# that's fine, return immediately
 			pass
+
+	@property
+	def motionlength(self):
+		return self._motionlength
+	@motionlength.setter
+	def motionlength(self,value):
+		self._motionlength=value
+		if self._motion: self._motion.motionlength=value
+	@property
+	def area(self):
+		return self._area
+	@area.setter
+	def area(self,value):
+		self._area=value
+		if self._motion: self._motion.area=value
+	@property
+	def frames(self):
+		return self._frames
+	@frames.setter
+	def frames(self,value):
+		self._frames=value
+		if self._motion: self._motion.frames=value
 
 	def start_camera(self):
 		"""Sets up PiCamera to record H.264 High/4.1 profile video with enough
@@ -252,6 +274,7 @@ class MotionRecorder(threading.Thread):
 		"""
 		while camera.recording:
 			camera.annotate_text = time.strftime("%y-%m-%d %H:%M") + " " + str(self._motion)
+			camera.annotate_background = True
 			self.wait(60-time.gmtime().tm_sec) # wait to beginning of minute
 
 	def motion_overlay(self):
