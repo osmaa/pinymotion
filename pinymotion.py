@@ -37,6 +37,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 	frames = 0
 	camera = None
 	trigger = threading.Event()
+	output = None
 
 	def __str__(self):
 		return "sensitivity {0}/{1}/{2}".format(self.motionlength, self.area, self.frames)
@@ -59,6 +60,9 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		self._last_frames = deque(maxlen=window)
 		logging.debug("motion detection sensitivity: "+str(self))
 
+	def save_motion_vectors(self,file)
+		self.output = open(file,"ab")
+
 	def set(self):
 		self.trigger.set()
 
@@ -79,6 +83,18 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		Must be faster than frame rate (max 100 ms for 10 fps stream).
 		Sets self.trigger Event to trigger capture.
 		"""
+
+		if self.disabled:
+			self._last_frames.append(False)
+			return
+
+		import struct
+		if self.output:
+			self.output.write(struct.pack('>8sL?8sBBB',
+				b'frameno\x00', self.camera.frame.index, self.motion(),
+				b'mvarray\x00', a.shape[0], a.shape[1], a[0].itemsize))
+			self.output.write(a)
+
 		a = np.sqrt(
 			np.square(a['x'].astype(np.float)) +
 			np.square(a['y'].astype(np.float))
@@ -98,6 +114,10 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		a[mask] = 0
 		self.field = a
 
+		# TODO: all the regions (and small movement) that we discarded as non-essential:
+		# should feed that to a subroutine that weights that kind of movement out of the
+		# picture in the future for auto-adaptive motion detector
+
 		# does that area size exceed the minimum motion threshold?
 		motion = (largest >= self.area)
 		# then consider motion repetition
@@ -114,7 +134,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 			return ret
 		longest_motion_sequence = count_longest(self._last_frames, True)
 
-		if longest_motion_sequence >= self.frames and not self.disabled:
+		if longest_motion_sequence >= self.frames:
 			self.set()
 		elif longest_motion_sequence < 1:
 			# clear motion flag once motion has ceased entirely
