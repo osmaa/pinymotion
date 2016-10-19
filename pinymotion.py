@@ -32,35 +32,34 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 	so we only have about 5000 blocks per frame to process. Numpy is fast enough for that.
 	"""
 
-	motionlength = 0
 	area = 0
 	frames = 0
+	window = 0
 	camera = None
 	trigger = threading.Event()
 	output = None
 
 	def __str__(self):
-		return "sensitivity {0}/{1}/{2}".format(self.motionlength, self.area, self.frames)
+		return "sensitivity {0}/{1}".format(self.area, self.frames)
 
-	def __init__(self, camera, window=10, motionlength = 10, area = 25, frames = 4):
+	def __init__(self, camera, window=10, area = 25, frames = 4):
 		"""Initialize motion vector reader
 
 		Parameters
 		----------
 		camera : PiCamera
-		motionlength : minimum length of motion vector to qualify for movement
 		size : minimum number of connected MV blocks (each 16x16 pixels) to qualify for movement
 		frames : minimum number of frames to contain movement to quality
 		"""
 		super(type(self), self).__init__(camera)
 		self.camera = camera
-		self.motionlength = motionlength
 		self.area = area
 		self.frames = frames
+		self.window = window
 		self._last_frames = deque(maxlen=window)
 		logging.debug("motion detection sensitivity: "+str(self))
 
-	def save_motion_vectors(self,file)
+	def save_motion_vectors(self,file):
 		self.output = open(file,"ab")
 
 	def set(self):
@@ -77,6 +76,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 
 	disabled = False
 	_last_frames = deque(maxlen=10)
+	noise = None
 	@profile
 	def analyse(self, a):
 		"""Runs once per frame on a 16x16 motion vector block buffer (about 5000 values).
@@ -95,6 +95,23 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 				b'mvarray\x00', a.shape[0], a.shape[1], a[0].itemsize))
 			self.output.write(a)
 
+		# the motion vector array we get from the camera contains three values per
+		# macroblock: the X and Y components of the inter-block motion vector, and
+		# sum-of-differences value. the SAD value has a completely different meaning
+		# on a per-frame basis, but abstracted over a longer timeframe in a mostly-still
+		# video stream, it ends up estimating noise pretty well. Accordingly, we
+		# can use it in a decay function to reduce sensitivity to noise on a per-block
+		# basis
+
+		# accumulate and decay SAD field
+		noise = self.noise
+		if not noise:
+			noise = np.zeros(a.shape,dtype=np.short)
+		shift = max(self.window.bit_length()-2,0)
+		noise -= ( noise >> shift ) + 1 # decay old noise
+		noise = np.add(noise, a['sad'] >> shift).clip(0)
+
+		# then look for motion vectors exceeding the length of the current mask
 		a = np.sqrt(
 			np.square(a['x'].astype(np.float)) +
 			np.square(a['y'].astype(np.float))
@@ -102,17 +119,16 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		self.field = a
 
 		# look for the largest continuous area in picture that has motion
-		mask = (a > self.motionlength) # every part of image which exceeds minimum motion
+		mask = (a > (noise >> 4)) # every motion vector exceeding current noise field
 		labels,count = ndimage.label(mask) # label all motion areas
 		sizes = ndimage.sum(mask, labels, range(count + 1)) # number of MV blocks per area
-		largest = np.sort(sizes)[-1] # largest area only
+		largest = np.sort(sizes)[-1] # what's the size of the largest area
 
 		# Do some extra work to clean up the preview overlay. Remove all but the largest
 		# motion region, and even that if it's just one MV block (considered noise)
-		mask = (sizes < max(largest,2))
-		mask = mask[labels] # every part of the image except for the largest object
-		a[mask] = 0
-		self.field = a
+		#mask = (sizes < max(largest,2))
+		#mask = mask[labels] # every part of the image except for the largest object
+		#self.field = mask
 
 		# TODO: all the regions (and small movement) that we discarded as non-essential:
 		# should feed that to a subroutine that weights that kind of movement out of the
@@ -122,7 +138,6 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		motion = (largest >= self.area)
 		# then consider motion repetition
 		self._last_frames.append(motion)
-		motion_frames = self._last_frames.count(True)
 
 		def count_longest(a,value):
 			ret = i = 0
@@ -139,7 +154,7 @@ class MotionVectorReader(picamera.array.PiMotionAnalysis):
 		elif longest_motion_sequence < 1:
 			# clear motion flag once motion has ceased entirely
 			self.clear()
-		return
+		return motion
 
 class MotionRecorder(threading.Thread):
 	"""Record video into a circular memory buffer and extract motion vectors for
@@ -147,15 +162,16 @@ class MotionRecorder(threading.Thread):
 	if motion is detected.
 	"""
 
-	# half of hardware resolution leaves us HD 4:3 and provides anti-aliasing/denoising
-	width = 2592//2
-	height = 1944//2
+	# half of hardware resolution leaves us HD 4:3 and provides 2x2 binning
+	# for V1 camera: 1296x972, for V2 camera: 1640x1232. Also use sensor_mode: 4
+	width = 1296
+	height = 972
 	framerate = 10 # lower framerate for more time on per-frame analysis
 	bitrate = 2000000 # 2Mbps is a high quality stream for 10 fps HD video
 	prebuffer = 10 # number of seconds to keep in buffer
 	postbuffer = 5 # number of seconds to record post end of motion
+	overlay = False
 	file_pattern = '%y-%m-%dT%H-%M-%S.h264' # filename pattern for time.strfime
-	_motionlength = 10 # expected magnitude of motion (per MV block)
 	_area = 25 # number of connected MV blocks (each 16x16 pixels) to count as a moving object
 	_frames = 4 # number of frames which must contain movement to trigger
 
@@ -167,7 +183,7 @@ class MotionRecorder(threading.Thread):
 		self.start_camera()
 		threading.Thread(name="blink", target=self.blink, daemon=True).start()
 		threading.Thread(name="annotate", target=self.annotate_with_datetime, args=(self._camera,), daemon=True).start()
-		threading.Thread(name="motion overlay", target=self.motion_overlay, daemon=True).start()
+		if self.overlay: threading.Thread(name="motion overlay", target=self.motion_overlay, daemon=True).start()
 		logging.info("now ready to detect motion")
 		return self
 
@@ -176,8 +192,9 @@ class MotionRecorder(threading.Thread):
 		if camera.recording:
 			camera.stop_recording()
 
-	def __init__(self, *args):
-		super().__init__(*args)
+	def __init__(self, overlay=False):
+		super().__init__()
+		self.overlay = overlay
 
 	def wait(self,timeout = 0.0):
 		"""Use this instead of time.sleep() from sub-threads so that they would
@@ -189,13 +206,6 @@ class MotionRecorder(threading.Thread):
 			# that's fine, return immediately
 			pass
 
-	@property
-	def motionlength(self):
-		return self._motionlength
-	@motionlength.setter
-	def motionlength(self,value):
-		self._motionlength=value
-		if self._motion: self._motion.motionlength=value
 	@property
 	def area(self):
 		return self._area
@@ -215,14 +225,14 @@ class MotionRecorder(threading.Thread):
 		"""Sets up PiCamera to record H.264 High/4.1 profile video with enough
 		intra frames that there is at least one in the in-memory circular buffer when
 		motion is detected."""
-		self._camera = camera = picamera.PiCamera(
+		self._camera = camera = picamera.PiCamera(clock_mode='raw', sensor_mode=4,
 			resolution=(self.width, self.height), framerate=self.framerate)
 		#camera.sensor_mode = 4
-		camera.start_preview(alpha=128)
+		if self.overlay: camera.start_preview(alpha=255)
 		self._stream = stream = picamera.PiCameraCircularIO(camera,
 			seconds=self.prebuffer+1, bitrate=self.bitrate)
 		self._motion = motion = MotionVectorReader(camera, window=self.postbuffer*self.framerate,
-			motionlength=self.motionlength, area=self.area, frames=self.frames)
+			area=self.area, frames=self.frames)
 		camera.start_recording(stream, motion_output=motion,
 			format='h264', profile='high', level='4.1', bitrate=self.bitrate,
 			inline_headers=True, intra_period=self.prebuffer*self.framerate // 2)
@@ -309,7 +319,6 @@ class MotionRecorder(threading.Thread):
 		# this thread will exit immediately if motion overlay is configured off
 		while self._camera.recording:
 			a = self._motion.field # last processed MV frame
-			motion = self.motionlength # minimum motion vector length
 			if a is not None:
 				# center MV array on output buffer
 				w = a.shape[1]
@@ -317,7 +326,7 @@ class MotionRecorder(threading.Thread):
 				h = a.shape[0]
 				y = (height-h)//2+1
 				# highlight those blocks which exceed thresholds on green channel
-				buffer[y:y+h,x:x+w,1] = (a > motion)*255
+				buffer[y:y+h,x:x+w,1] = a * 255
 			try:
 				overlay.update(memoryview(buffer))
 			except picamera.exc.PiCameraRuntimeError as e:
