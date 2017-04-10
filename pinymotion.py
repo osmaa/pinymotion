@@ -240,6 +240,10 @@ class MotionRecorder(threading.Thread):
 
 	captures = queue.Queue()
 
+	def capture_jpeg(self):
+		camera = self._camera
+		camera.capture('/dev/shm/picamera.jpg', use_video_port=True, format='jpeg', quality=80)
+
 	def run(self):
 		"""Main loop of the motion recorder. Waits for trigger from the motion detector
 		async task and writes in-memory circular buffer to file every time it happens,
@@ -267,6 +271,8 @@ class MotionRecorder(threading.Thread):
 						pass
 					finally:
 						output.close()
+						# also store a JPEG of the current view
+						self.capture_jpeg()
 						self._output = None
 						self._camera.led = False
 						self.captures.put(name)
