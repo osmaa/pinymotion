@@ -19,7 +19,7 @@ from collections import deque
 # a no-op to handle the profile decorator -- or uncomment the profile import below
 def profile(func):
    def func_wrapper(*args, **kwargs):
-       return func(*args, **kwargs)
+	   return func(*args, **kwargs)
    return func_wrapper
 
 #from profilehooks import profile
@@ -196,6 +196,10 @@ class MotionRecorder(threading.Thread):
 		super().__init__()
 		self.overlay = overlay
 
+	def __str__(self):
+		if (self._motion):
+			return str(self._motion)
+
 	def wait(self,timeout = 0.0):
 		"""Use this instead of time.sleep() from sub-threads so that they would
 		wake up to exit quickly when instance is being shut down.
@@ -309,7 +313,7 @@ class MotionRecorder(threading.Thread):
 		"""Background thread for annotating date and time to video.
 		"""
 		while camera.recording:
-			camera.annotate_text = time.strftime("%y-%m-%d %H:%M") + " " + str(self._motion)
+			camera.annotate_text = time.strftime("%y-%m-%d %H:%M") + " " + str(self)
 			camera.annotate_background = True
 			self.wait(60-time.gmtime().tm_sec) # wait to beginning of minute
 
